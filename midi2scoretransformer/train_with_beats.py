@@ -275,6 +275,11 @@ def main():
     parser.add_argument("--fast_dev_run", action="store_true")
     parser.add_argument("--limit_train_batches", type=float, default=1.0)
     parser.add_argument("--limit_val_batches", type=float, default=1.0)
+    parser.add_argument(
+        "--disable_slurm_env",
+        action="store_true",
+        help="Force Lightning to ignore SLURM environment detection (useful on misconfigured clusters).",
+    )
 
     # output
     parser.add_argument("--out_dir", type=str, default="./runs")
@@ -397,6 +402,7 @@ def main():
         max_steps=args.max_steps,
         gradient_clip_val=0.5,
         logger=logger,
+        plugins=[pl.plugins.environments.LightningEnvironment()] if args.disable_slurm_env else None,
         callbacks=[ckpt_cb, lr_cb],
         log_every_n_steps=20,
         fast_dev_run=args.fast_dev_run,
