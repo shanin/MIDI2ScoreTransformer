@@ -119,8 +119,9 @@ def make_measures(midi, midi_score, mxl, annots, swap=True):
     return measures
 
 
-def handle_file(midi_path, mxl_path, save_path):
-    annots = annotations[midi_path.replace("/mnt/ssd/hbli/datasets/PM2S_dataset/midi2scoretransformer/asap-dataset/", "")]
+def handle_file(midi_path, mxl_path, save_path, *, asap_root: str, annotations: dict):
+    rel_key = os.path.relpath(midi_path, asap_root).replace(os.sep, "/")
+    annots = annotations[rel_key]
     if not annots["score_and_performance_aligned"]:
         return
     import warnings
@@ -153,23 +154,19 @@ def handle_file(midi_path, mxl_path, save_path):
 
 
 if __name__ == "__main__":
-    annotations = json.load(open("/mnt/ssd/hbli/datasets/PM2S_dataset/midi2scoretransformer/asap-dataset/asap_annotations.json"))
-    skip = set(["/mnt/ssd/hbli/datasets/PM2S_dataset/midi2scoretransformer/asap-dataset/Glinka/The_Lark"])
-    paths = []
-    for root, dirs, files in os.walk("/mnt/ssd/hbli/datasets/PM2S_dataset/midi2scoretransformer/asap-dataset/"):
-        for file in files:
-            if file.endswith(".musicxml") and root not in skip:
-                mxl_path = os.path.join(root, file)
-                break
-        else:
-            continue
-        for file in files:
-            if file.endswith(".mid") and not file.startswith("midi_score"):
-                midi_path = os.path.join(root, file)
-                save_path = os.path.join(root, file.replace(".mid", "_chunks.json"))
-                paths.append((midi_path, mxl_path, save_path))
+    import argparse
 
-    q = ASAPDataset("/mnt/ssd/hbli/datasets/PM2S_dataset/midi2scoretransformer/", "all")
+    parser = argparse.ArgumentParser(description="Generate *_chunks.json for ASAP performances.")
+    parser.add_argument("--data_dir", type=str, default="./data/", help="Root data dir containing asap-dataset/ and ACPAS-dataset/.")
+    parser.add_argument("--num_jobs", type=int, default=16)
+    parser.add_argument("--verbose", type=int, default=10)
+    args = parser.parse_args()
+
+    asap_root = os.path.join(args.data_dir, "asap-dataset")
+    annotations_path = os.path.join(asap_root, "asap_annotations.json")
+    annotations = json.load(open(annotations_path))
+
+    q = ASAPDataset(args.data_dir, "all")
     midi_paths = [
         q.metadata.iloc[idx]["performance_MIDI_external"].replace(
             "{ASAP}", f"{q.data_dir}asap-dataset"
@@ -181,7 +178,7 @@ if __name__ == "__main__":
     ]
     save_paths = [m.replace(".mid", "_chunks.json") for m in midi_paths]
     paths = list(zip(midi_paths, mxl_paths, save_paths))
-    Parallel(n_jobs=min(16, len(paths)), verbose=10)(
-        delayed(handle_file)(midi_path, mxl_path, save_path)
+    Parallel(n_jobs=min(args.num_jobs, len(paths)), verbose=args.verbose)(
+        delayed(handle_file)(midi_path, mxl_path, save_path, asap_root=asap_root, annotations=annotations)
         for midi_path, mxl_path, save_path in paths
     )
