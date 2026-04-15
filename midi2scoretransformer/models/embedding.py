@@ -16,6 +16,8 @@ class MIDIEmbeddings(nn.Module):
             "duration": nn.Linear(config.in_duration_vocab_size, config.embedding_size, bias=config.bias),
             "pitch": nn.Linear(config.in_pitch_vocab_size, config.embedding_size, bias=config.bias),
             "velocity": nn.Linear(config.in_velocity_vocab_size, config.embedding_size, bias=config.bias),
+            "beat_in_bar": nn.Linear(config.in_beat_in_bar_vocab_size, config.embedding_size, bias=config.bias),
+            "beat_phase": nn.Linear(config.in_beat_phase_vocab_size, config.embedding_size, bias=config.bias),
             "unconditional": nn.Linear(1, config.embedding_size, bias=False),
         })
         self.layer_norm = nn.LayerNorm(config.embedding_size, eps=config.layer_norm_eps, bias=config.bias)

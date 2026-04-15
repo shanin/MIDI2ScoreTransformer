@@ -27,6 +27,8 @@ class MyModelConfig(RoFormerConfig):
         in_duration_vocab_size=200,
         in_pitch_vocab_size=128,
         in_velocity_vocab_size=8,
+        in_beat_in_bar_vocab_size=13,
+        in_beat_phase_vocab_size=49,
         out_offset_vocab_size=FEATURES['offset']['vocab_size'],
         out_downbeat_vocab_size=FEATURES['downbeat']['vocab_size'],
         out_duration_vocab_size=FEATURES['duration']['vocab_size'],
@@ -52,6 +54,8 @@ class MyModelConfig(RoFormerConfig):
         self.in_duration_vocab_size = in_duration_vocab_size
         self.in_pitch_vocab_size = in_pitch_vocab_size
         self.in_velocity_vocab_size = in_velocity_vocab_size
+        self.in_beat_in_bar_vocab_size = in_beat_in_bar_vocab_size
+        self.in_beat_phase_vocab_size = in_beat_phase_vocab_size
         self.out_offset_vocab_size = out_offset_vocab_size
         self.out_downbeat_vocab_size = out_downbeat_vocab_size
         self.out_duration_vocab_size = out_duration_vocab_size
