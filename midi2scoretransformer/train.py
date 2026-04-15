@@ -258,6 +258,13 @@ def main():
     parser.add_argument("--data_dir", type=str, default="./data/")
     parser.add_argument("--run_name", type=str, default="pm2s_roformer")
     parser.add_argument("--seed", type=int, default=42)
+    # logging
+    parser.add_argument("--use_wandb", action="store_true", help="Enable Weights & Biases logging via WandbLogger.")
+    parser.add_argument("--wandb_project", type=str, default="MIDI2ScoreTransformer")
+    parser.add_argument("--wandb_entity", type=str, default=None)
+    parser.add_argument("--wandb_tags", type=str, default="", help="Comma-separated list of tags.")
+    parser.add_argument("--wandb_mode", type=str, default=None, help="W&B mode: 'online', 'offline', or 'disabled'.")
+    parser.add_argument("--wandb_log_model", type=str, default=None, help="WandbLogger log_model setting (e.g. 'all').")
 
     # dataloader
     parser.add_argument("--batch_size", type=int, default=32)
@@ -337,7 +344,32 @@ def main():
 
     model = build_model(args)
 
-    logger = CSVLogger(save_dir=args.out_dir, name=args.run_name)
+    loggers = [CSVLogger(save_dir=args.out_dir, name=args.run_name)]
+    if args.use_wandb:
+        try:
+            from pytorch_lightning.loggers import WandbLogger
+        except Exception as e:
+            raise ImportError(
+                "W&B logging requested but WandbLogger could not be imported. "
+                "Install: `pip install wandb` (and ensure Lightning supports it)."
+            ) from e
+        if args.wandb_mode is not None:
+            os.environ["WANDB_MODE"] = args.wandb_mode
+        wandb_logger = WandbLogger(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=args.run_name,
+            save_dir=args.out_dir,
+            log_model=args.wandb_log_model,
+            tags=[t.strip() for t in args.wandb_tags.split(",") if t.strip()] if args.wandb_tags else None,
+        )
+        try:
+            wandb_logger.log_hyperparams(vars(args))
+        except Exception:
+            pass
+        loggers.append(wandb_logger)
+
+    logger = loggers if len(loggers) > 1 else loggers[0]
     ckpt_cb = ModelCheckpoint(
         dirpath=os.path.join(args.out_dir, args.run_name, "checkpoints"),
         filename="{step}-{val/loss_total:.4f}",
