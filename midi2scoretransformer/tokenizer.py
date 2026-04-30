@@ -1,6 +1,7 @@
 """Tokenizer for music21 streams and pretty_midi objects."""
 
 import math
+import os
 from fractions import Fraction
 from typing import Dict, List
 
@@ -23,6 +24,9 @@ from music21 import (
 from music21.common.numberTools import opFrac
 from music21.midi.translate import prepareStreamForMidi
 from score_utils import realize_spanners
+
+from beat_features import BeatFeatureConfig, compute_midi_beat_features_onehot
+from beat_txt import BeatTxtConfig, infer_annotations_txt_path, load_annotations_txt
 
 
 class Downbeat:
@@ -140,6 +144,52 @@ class MultistreamTokenizer:
         """
         midi_streams = MultistreamTokenizer.parse_midi(midi_path)
         return MultistreamTokenizer.bucket_midi(midi_streams)
+
+    @staticmethod
+    def tokenize_midi_with_beats(
+        midi_path: str,
+        *,
+        annotations_path: str | None = None,
+        annotations_suffix: str = "_annotations.txt",
+        beat_feat_cfg: BeatFeatureConfig = BeatFeatureConfig(),
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Tokenize a MIDI file and enrich it with external beat-tracker features.
+
+        This preserves the existing pipeline shape (bucketed one-hot streams) by
+        adding two additional one-hot streams:
+          - beat_in_bar: (T, max_beats_per_bar+1)
+          - beat_phase:  (T, phase_bins+1)
+        """
+        midi_streams = MultistreamTokenizer.parse_midi(midi_path)
+
+        cfg = BeatTxtConfig(suffix=annotations_suffix)
+        if annotations_path is None:
+            annotations_path = infer_annotations_txt_path(midi_path, config=cfg)
+
+        if not annotations_path or (not os.path.exists(annotations_path)):
+            beat_feats = compute_midi_beat_features_onehot(
+                midi_streams["onset"],
+                beats_s=None,
+                downbeats_s=None,
+                perf_time_signatures=None,
+                beat_types=None,
+                config=beat_feat_cfg,
+            )
+        else:
+            ann = load_annotations_txt(annotations_path)
+            beat_feats = compute_midi_beat_features_onehot(
+                midi_streams["onset"],
+                beats_s=ann.get("beats_s", None),
+                downbeats_s=ann.get("downbeats_s", None),
+                perf_time_signatures=ann.get("perf_time_signatures", None),
+                beat_types=ann.get("beat_types", None),
+                config=beat_feat_cfg,
+            )
+
+        x = MultistreamTokenizer.bucket_midi(midi_streams)
+        x.update(beat_feats)
+        return x
 
     @staticmethod
     def mxl_to_list(mxl_path: str) -> tuple[List[note.Note], stream.Score]:

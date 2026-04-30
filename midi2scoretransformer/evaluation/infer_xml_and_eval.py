@@ -27,6 +27,7 @@ from tokenizer import MultistreamTokenizer
 from utils import infer, pad_batch, score_similarity_normalized
 from score_utils import postprocess_score
 from muster import muster
+from beat_features import BeatFeatureConfig
 
 device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
 
@@ -161,6 +162,11 @@ def main():
     parser.add_argument("--kv_cache", action="store_true", help="enable kv_cache in generate")
     parser.add_argument("--n_jobs", type=int, default=16, help="parallel jobs for eval")
     parser.add_argument("--fast_eval", action="store_true", help="keep for compatibility; not used here")
+
+    # external beats (ASAP-style *_annotations.txt next to MIDI)
+    parser.add_argument("--annotations_suffix", type=str, default="_annotations.txt")
+    parser.add_argument("--beat_phase_bins", type=int, default=48, help="Must match the beat-augmented model config.")
+    parser.add_argument("--max_beats_per_bar", type=int, default=12, help="Must match the beat-augmented model config.")
     args = parser.parse_args()
 
     ensure_dir(args.out_dir)
@@ -185,8 +191,13 @@ def main():
     print("Tokenizing all songs")
     inputs = []
     lengths = []
+    beat_feat_cfg = BeatFeatureConfig(phase_bins=args.beat_phase_bins, max_beats_per_bar=args.max_beats_per_bar)
     for midi_path, _ in tqdm(paths):
-        x = MultistreamTokenizer.tokenize_midi(midi_path)
+        x = MultistreamTokenizer.tokenize_midi_with_beats(
+            midi_path,
+            annotations_suffix=args.annotations_suffix,
+            beat_feat_cfg=beat_feat_cfg,
+        )
         inputs.append({k: v.unsqueeze(0).to(device) for k, v in x.items()})
         lengths.append(int(x["pitch"].shape[0]))
 

@@ -55,11 +55,30 @@ def score_similarity_normalized(est, gt, full=False):
 
 
 
-def quantize_path(path, model, **kwargs):
+def quantize_path(
+    path,
+    model,
+    *,
+    annotations_path: str | None = None,
+    annotations_suffix: str = "_annotations.txt",
+    beat_phase_bins: int = 48,
+    max_beats_per_bar: int = 12,
+    **kwargs,
+):
     """Quantize a midi file at `path` using the model `model`.
     The resulting score should be saved with makeNotation=False.
     """
-    x = MultistreamTokenizer.tokenize_midi(path)
+    if annotations_path is None:
+        x = MultistreamTokenizer.tokenize_midi(path)
+    else:
+        from beat_features import BeatFeatureConfig
+
+        x = MultistreamTokenizer.tokenize_midi_with_beats(
+            path,
+            annotations_path=annotations_path,
+            annotations_suffix=annotations_suffix,
+            beat_feat_cfg=BeatFeatureConfig(phase_bins=beat_phase_bins, max_beats_per_bar=max_beats_per_bar),
+        )
     y_hat = infer(x, model, **kwargs)
     mxl = MultistreamTokenizer.detokenize_mxl(y_hat)
     mxl = postprocess_score(mxl)

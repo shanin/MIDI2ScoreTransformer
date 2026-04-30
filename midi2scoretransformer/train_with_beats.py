@@ -9,8 +9,10 @@ from typing import Any, Dict, Tuple
 
 import torch
 from torch.utils.data import DataLoader
+import torch.nn as nn
 
 from beat_features import BeatFeatureConfig, compute_midi_beat_features_onehot
+from beat_txt import BeatTxtConfig, infer_annotations_txt_path, load_annotations_txt
 from config import MyModelConfig
 from dataset import ASAPDataset, sha256
 from tokenizer import MultistreamTokenizer
@@ -22,16 +24,13 @@ class BeatAugmentedASAPDataset(ASAPDataset):
     def __init__(
         self,
         *args,
-        asap_annotations_json: str | None = None,
+        annotations_suffix: str = "_annotations.txt",
         beat_phase_bins: int = 48,
         max_beats_per_bar: int = 12,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        if asap_annotations_json is None:
-            asap_annotations_json = os.path.join(self.data_dir, "asap-dataset", "asap_annotations.json")
-        with open(asap_annotations_json, "r") as f:
-            self._asap_annots = json.load(f)
+        self._beat_txt_cfg = BeatTxtConfig(suffix=annotations_suffix)
         self._beat_cfg = BeatFeatureConfig(phase_bins=beat_phase_bins, max_beats_per_bar=max_beats_per_bar)
 
     def __getitem__(self, idx: int) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
@@ -52,6 +51,7 @@ class BeatAugmentedASAPDataset(ASAPDataset):
 
         input_stream, output_stream = torch.load(pkl_file, weights_only=False)
 
+        tempo_scale = 1.0
         if self.augmentations.get("transpose", False):
             max_semitones = int(self.augmentations["transpose"])
             shift = random.randint(-max_semitones, max_semitones)
@@ -64,8 +64,8 @@ class BeatAugmentedASAPDataset(ASAPDataset):
             )
 
         if (v := self.augmentations.get("tempo_jitter", False)):
-            alpha = random.uniform(*v)
-            input_stream["onset"] = input_stream["onset"] * alpha
+            tempo_scale = random.uniform(*v)
+            input_stream["onset"] = input_stream["onset"] * tempo_scale
         if (v := self.augmentations.get("duration_jitter", False)):
             beta = random.uniform(*v)
             input_stream["duration"] = input_stream["duration"] * beta
@@ -81,24 +81,39 @@ class BeatAugmentedASAPDataset(ASAPDataset):
             return input_stream, output_stream
 
         # ---- Beat feature injection (continuous onset seconds) -----------------
-        asap_key = sample["performance_MIDI_external"].replace("{ASAP}/", "")
-        ann = self._asap_annots.get(asap_key, None)
-        if ann is None:
+        ann_path = infer_annotations_txt_path(sample_path, config=self._beat_txt_cfg)
+        if os.path.exists(ann_path):
+            ann = load_annotations_txt(ann_path)
+            beats_s = ann.get("beats_s", None)
+            downbeats_s = ann.get("downbeats_s", None)
+            perf_ts = ann.get("perf_time_signatures", None)
+            beat_types = ann.get("beat_types", None)
+
+            if tempo_scale != 1.0:
+                if isinstance(beats_s, list):
+                    beats_s = [float(t) * tempo_scale for t in beats_s]
+                if isinstance(downbeats_s, list):
+                    downbeats_s = [float(t) * tempo_scale for t in downbeats_s]
+                if isinstance(perf_ts, dict):
+                    perf_ts = {str(float(k) * tempo_scale): v for k, v in perf_ts.items()}
+                if isinstance(beat_types, dict):
+                    beat_types = {str(float(k) * tempo_scale): v for k, v in beat_types.items()}
+
+            beat_feats = compute_midi_beat_features_onehot(
+                input_stream["onset"],
+                beats_s=beats_s,
+                downbeats_s=downbeats_s,
+                perf_time_signatures=perf_ts,
+                beat_types=beat_types,
+                config=self._beat_cfg,
+            )
+        else:
             beat_feats = compute_midi_beat_features_onehot(
                 input_stream["onset"],
                 beats_s=None,
                 downbeats_s=None,
                 perf_time_signatures=None,
                 beat_types=None,
-                config=self._beat_cfg,
-            )
-        else:
-            beat_feats = compute_midi_beat_features_onehot(
-                input_stream["onset"],
-                beats_s=ann.get("performance_beats", None),
-                downbeats_s=ann.get("performance_downbeats", None),
-                perf_time_signatures=ann.get("perf_time_signatures", None),
-                beat_types=ann.get("performance_beats_type", None),
                 config=self._beat_cfg,
             )
 
@@ -225,13 +240,19 @@ def build_model_with_beats(args) -> TrainRoformer:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, default="./data/")
-    parser.add_argument("--asap_annotations_json", type=str, default=None)
+    parser.add_argument("--annotations_suffix", type=str, default="_annotations.txt")
     parser.add_argument("--run_name", type=str, default="pm2s_roformer_beats")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--smoke_test_only",
         action="store_true",
         help="Only run a single batch key/shape/model forward check (no Lightning required).",
+    )
+    parser.add_argument(
+        "--init_from_ckpt",
+        type=str,
+        default=None,
+        help="Optional Lightning .ckpt to warm-start from (loads non-strictly; new beat embedding layers stay initialized).",
     )
     # logging
     parser.add_argument("--use_wandb", action="store_true", help="Enable Weights & Biases logging via WandbLogger.")
@@ -295,7 +316,7 @@ def main():
         padding="per-beat",
         augmentations={},
         return_continous=False,
-        asap_annotations_json=args.asap_annotations_json,
+        annotations_suffix=args.annotations_suffix,
         beat_phase_bins=args.beat_phase_bins,
         max_beats_per_bar=args.max_beats_per_bar,
     )
@@ -307,7 +328,7 @@ def main():
         padding="per-beat",
         augmentations={},
         return_continous=False,
-        asap_annotations_json=args.asap_annotations_json,
+        annotations_suffix=args.annotations_suffix,
         beat_phase_bins=args.beat_phase_bins,
         max_beats_per_bar=args.max_beats_per_bar,
     )
@@ -332,6 +353,35 @@ def main():
     )
 
     model = build_model_with_beats(args)
+
+    # Warm-start from an existing Lightning checkpoint (e.g. original PM2S model).
+    # We keep this non-strict to allow newly added beat embedding layers.
+    if args.init_from_ckpt:
+        ckpt = torch.load(args.init_from_ckpt, map_location="cpu", weights_only=False)
+        state_dict = ckpt.get("state_dict", ckpt)
+
+        # Initialize new beat embedding projections close to "no effect" so the
+        # warm-start behaves like the original model at step 0.
+        for k in ("beat_in_bar", "beat_phase"):
+            if k in model.embeddings_enc.embeddings:
+                layer = model.embeddings_enc.embeddings[k]
+                if isinstance(layer, nn.Linear):
+                    nn.init.zeros_(layer.weight)
+                    if layer.bias is not None:
+                        nn.init.zeros_(layer.bias)
+
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        print(f"[init_from_ckpt] loaded: {args.init_from_ckpt}")
+        print(f"[init_from_ckpt] missing keys: {len(missing)}")
+        for k in missing[:50]:
+            print(f"  MISSING: {k}")
+        if len(missing) > 50:
+            print("  ...")
+        print(f"[init_from_ckpt] unexpected keys: {len(unexpected)}")
+        for k in unexpected[:50]:
+            print(f"  UNEXPECTED: {k}")
+        if len(unexpected) > 50:
+            print("  ...")
 
     # Quick runtime sanity check on keys + dims.
     xb, yb = next(iter(train_loader))

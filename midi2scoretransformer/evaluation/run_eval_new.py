@@ -19,6 +19,7 @@ from dataset import ASAPDataset
 from models.roformer import Roformer
 from tokenizer import MultistreamTokenizer
 from utils import eval, infer, pad_batch
+from beat_features import BeatFeatureConfig
 
 device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
 
@@ -27,6 +28,9 @@ if __name__ == '__main__':
     parser.add_argument("--split", type=str)
     parser.add_argument("--model", type=str, default=None)
     parser.add_argument("--fast_eval", action="store_true")
+    parser.add_argument("--annotations_suffix", type=str, default="_annotations.txt")
+    parser.add_argument("--beat_phase_bins", type=int, default=48)
+    parser.add_argument("--max_beats_per_bar", type=int, default=12)
     args = parser.parse_args()
 
     q = ASAPDataset("/mnt/ssd/hbli/datasets/PM2S_dataset/midi2scoretransformer/", args.split)
@@ -46,8 +50,13 @@ if __name__ == '__main__':
     print("Load + Tokenize all songs")
     inputs = []
     lengths = []
+    beat_feat_cfg = BeatFeatureConfig(phase_bins=args.beat_phase_bins, max_beats_per_bar=args.max_beats_per_bar)
     for midi, gt_mxl in tqdm(paths):
-        x = MultistreamTokenizer.tokenize_midi(midi)
+        x = MultistreamTokenizer.tokenize_midi_with_beats(
+            midi,
+            annotations_suffix=args.annotations_suffix,
+            beat_feat_cfg=beat_feat_cfg,
+        )
         inputs.append({k: v.unsqueeze(0).to(device) for k, v in x.items()})
         lengths.append(x["pitch"].shape[0])
 
