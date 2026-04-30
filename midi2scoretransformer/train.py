@@ -86,6 +86,11 @@ class TrainRoformer(Roformer):
         teacher_keep_prob: float = 0.25,
         warmup_steps: int = 4000,
         max_steps: int = 40000,
+        freeze_encoder: bool = False,
+        freeze_decoder: bool = False,
+        freeze_embeddings_enc: bool = False,
+        freeze_embeddings_dec: bool = False,
+        freeze_unembeddings_dec: bool = False,
     ):
         super().__init__(enc_configuration, dec_configuration, hyperparameters)
         self.lr = lr
@@ -94,12 +99,33 @@ class TrainRoformer(Roformer):
         self.teacher_keep_prob = teacher_keep_prob
         self.warmup_steps = warmup_steps
         self.max_steps = max_steps
+        self.freeze_encoder = freeze_encoder
+        self.freeze_decoder = freeze_decoder
+        self.freeze_embeddings_enc = freeze_embeddings_enc
+        self.freeze_embeddings_dec = freeze_embeddings_dec
+        self.freeze_unembeddings_dec = freeze_unembeddings_dec
 
         # Pre-build loss weights/ignore_index map from FEATURES
         self._feat_loss_weight = {k: v["loss_weight"] for k, v in FEATURES.items()}
         self._feat_ignore_index = {k: v["ignore_index"] for k, v in FEATURES.items()}
 
         self._bce = nn.BCEWithLogitsLoss(reduction="none")
+
+        self.apply_freezing()
+
+    def apply_freezing(self) -> None:
+        """Set requires_grad according to freeze_* flags (call again after checkpoint load if needed)."""
+        def _freeze_module(mod: nn.Module, flag: bool) -> None:
+            for p in mod.parameters():
+                p.requires_grad = not flag
+
+        _freeze_module(self.encoder, self.freeze_encoder)
+        _freeze_module(self.decoder, self.freeze_decoder)
+        _freeze_module(self.embeddings_enc, self.freeze_embeddings_enc)
+        _freeze_module(self.embeddings_dec, self.freeze_embeddings_dec)
+        _freeze_module(self.unembeddings_dec, self.freeze_unembeddings_dec)
+        # Post-encoder LayerNorm: tie to encoder freezing (if encoder is frozen, freeze this too).
+        _freeze_module(self.norm, self.freeze_encoder)
 
     @staticmethod
     def _ce_onehot(
@@ -192,7 +218,10 @@ class TrainRoformer(Roformer):
         return total
 
     def configure_optimizers(self):
-        opt = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        params = [p for p in self.parameters() if p.requires_grad]
+        if not params:
+            raise RuntimeError("No trainable parameters: check freeze_* flags.")
+        opt = torch.optim.AdamW(params, lr=self.lr, weight_decay=self.weight_decay)
 
         if get_cosine_schedule_with_warmup is None:
             return opt

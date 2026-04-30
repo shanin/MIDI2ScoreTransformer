@@ -234,6 +234,11 @@ def build_model_with_beats(args) -> TrainRoformer:
         teacher_keep_prob=args.teacher_keep_prob,
         warmup_steps=args.warmup_steps,
         max_steps=args.max_steps,
+        freeze_encoder=args.freeze_encoder,
+        freeze_decoder=args.freeze_decoder,
+        freeze_embeddings_enc=args.freeze_embeddings_enc,
+        freeze_embeddings_dec=args.freeze_embeddings_dec,
+        freeze_unembeddings_dec=args.freeze_unembeddings_dec,
     )
 
 
@@ -291,6 +296,17 @@ def main():
     # loss tricks
     parser.add_argument("--pad_loss_weight", type=float, default=0.1)
     parser.add_argument("--teacher_keep_prob", type=float, default=0.25)
+
+    # partial finetuning (freeze subsets; optimizer only sees requires_grad=True params)
+    parser.add_argument("--freeze_encoder", action="store_true", help="Freeze encoder transformer (+ enc post-norm).")
+    parser.add_argument(
+        "--freeze_decoder",
+        action="store_true",
+        help="Freeze decoder transformer (still runs forward; no decoder weight updates).",
+    )
+    parser.add_argument("--freeze_embeddings_enc", action="store_true", help="Freeze MIDI embedding streams.")
+    parser.add_argument("--freeze_embeddings_dec", action="store_true", help="Freeze MusicXML input embeddings to decoder.")
+    parser.add_argument("--freeze_unembeddings_dec", action="store_true", help="Freeze decoder output heads (MXL unembedding).")
 
     # runtime/debug
     parser.add_argument("--gpu_id", type=int, default=0)
@@ -354,6 +370,15 @@ def main():
         persistent_workers=(args.num_workers > 0),
     )
 
+    print(
+        "[model] arch:"
+        f" hidden_size={args.hidden_size}"
+        f" num_layers={args.num_layers}"
+        f" num_heads={args.num_heads}"
+        f" intermediate_size={args.intermediate_size}"
+        f" (SwiGLU: first FFN linear out_dim = {2 * args.intermediate_size})"
+    )
+
     model = build_model_with_beats(args)
 
     # Warm-start from an existing Lightning checkpoint (e.g. original PM2S model).
@@ -361,6 +386,24 @@ def main():
     if args.init_from_ckpt:
         ckpt = torch.load(args.init_from_ckpt, map_location="cpu", weights_only=False)
         state_dict = ckpt.get("state_dict", ckpt)
+
+        # Preflight: SwiGLU FFN shapes depend on intermediate_size; strict=False does NOT
+        # ignore size mismatches. Fail fast with an actionable hint.
+        sample_key = "encoder.encoder.layer.0.intermediate.dense.weight"
+        if sample_key in state_dict and sample_key in model.state_dict():
+            ck_w = state_dict[sample_key]
+            md_w = model.state_dict()[sample_key]
+            if tuple(ck_w.shape) != tuple(md_w.shape):
+                ck_intermediate = int(ck_w.shape[0]) // 2
+                md_intermediate = int(md_w.shape[0]) // 2
+                raise ValueError(
+                    "Checkpoint FFN shape does not match built model (cannot load).\n"
+                    f"  key={sample_key}\n"
+                    f"  checkpoint: {tuple(ck_w.shape)}  -> implied intermediate_size={ck_intermediate} (SwiGLU)\n"
+                    f"  model     : {tuple(md_w.shape)}  -> implied intermediate_size={md_intermediate} (SwiGLU)\n"
+                    f"  you passed --intermediate_size {args.intermediate_size}\n"
+                    f"Fix: rerun with --intermediate_size {ck_intermediate} (and matching hidden_size/depth/heads)."
+                )
 
         # Initialize new beat embedding projections close to "no effect" so the
         # warm-start behaves like the original model at step 0.
@@ -384,6 +427,12 @@ def main():
             print(f"  UNEXPECTED: {k}")
         if len(unexpected) > 50:
             print("  ...")
+
+    # Re-apply freezing after checkpoint load (requires_grad is metadata; harmless repeat).
+    model.apply_freezing()
+    n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    n_tot = sum(p.numel() for p in model.parameters())
+    print(f"[freeze] trainable params: {n_train/1e6:.3f}M / {n_tot/1e6:.3f}M")
 
     # Quick runtime sanity check on keys + dims.
     xb, yb = next(iter(train_loader))
