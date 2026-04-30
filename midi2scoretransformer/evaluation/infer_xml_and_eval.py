@@ -24,7 +24,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dataset import ASAPDataset
 from models.roformer import Roformer
 from tokenizer import MultistreamTokenizer
-from utils import infer, pad_batch, score_similarity_normalized, muster
+from utils import infer, pad_batch, score_similarity_normalized, get_muster_fn
 from score_utils import postprocess_score
 from beat_features import BeatFeatureConfig
 
@@ -93,9 +93,10 @@ def eval_from_tokens_and_write_xml(
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
+        muster_metric = get_muster_fn()
         sim = {
             "mxl <-> gt_mxl": score_similarity_normalized(mxl, gt_mxl_path, full=False),
-            "muster": muster(mxl, gt_mxl_path),
+            "muster": muster_metric(mxl, gt_mxl_path) if muster_metric is not None else None,
         }
 
     return sim, pred_xml_path

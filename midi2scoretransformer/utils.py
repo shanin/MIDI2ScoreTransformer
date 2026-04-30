@@ -9,29 +9,45 @@ from tokenizer import MultistreamTokenizer
 from score_utils import postprocess_score
 
 
-def _import_muster():
+_muster_fn = None
+_muster_fn_failed = False
+
+
+def get_muster_fn():
     """
-    Resolve the MUSTER metric function even if a different `muster` package is on sys.path.
+    Lazy-resolve the MUSTER metric callable.
 
-    Some environments install an unrelated PyPI package named `muster` whose top-level
-    `__init__.py` does not re-export `muster`. The evaluation wrapper used in this repo
-    lives at `muster.muster:muster` in the MUSTER pip distribution.
+    Training imports `utils.py` only for tensor helpers (`cat_dict`, `cut_pad`) via
+    `dataset.py`, so importing MUSTER at module import time is unnecessary and can break
+    training if the environment has a conflicting/unrelated `muster` distribution.
     """
-    m = importlib.import_module("muster")
-    fn = getattr(m, "muster", None)
-    if callable(fn):
-        return fn
-    m2 = importlib.import_module("muster.muster")
-    fn = getattr(m2, "muster", None)
-    if callable(fn):
-        return fn
-    raise ImportError(
-        "Could not import MUSTER metric function `muster`. "
-        "Expected `from muster import muster` or `from muster.muster import muster`."
-    )
+    global _muster_fn, _muster_fn_failed
+    if _muster_fn is not None:
+        return _muster_fn
+    if _muster_fn_failed:
+        return None
 
+    try:
+        m = importlib.import_module("muster")
+        fn = getattr(m, "muster", None)
+        if callable(fn):
+            _muster_fn = fn
+            return _muster_fn
+    except Exception:
+        pass
 
-muster = _import_muster()
+    try:
+        m2 = importlib.import_module("muster.muster")
+        fn = getattr(m2, "muster", None)
+        if callable(fn):
+            _muster_fn = fn
+            return _muster_fn
+    except Exception:
+        pass
+
+    _muster_fn_failed = True
+    return None
+
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -43,9 +59,10 @@ def eval(y_hat, gt_mxl_path: str) -> dict[str, dict[str, float]|None]:
     # fmt: off
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
+        muster_metric = get_muster_fn()
         sim = {
             "mxl <-> gt_mxl": score_similarity_normalized(mxl, gt_mxl_path, full=False),
-            "muster": muster(mxl, gt_mxl_path),
+            "muster": muster_metric(mxl, gt_mxl_path) if muster_metric is not None else None,
         }
     return sim
     # fmt: on
