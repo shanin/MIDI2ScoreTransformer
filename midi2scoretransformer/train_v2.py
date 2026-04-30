@@ -276,7 +276,7 @@ def main():
     parser.add_argument("--hidden_size", type=int, default=512)
     parser.add_argument("--num_layers", type=int, default=4)
     parser.add_argument("--num_heads", type=int, default=8)
-    parser.add_argument("--intermediate_size", type=int, default=3072)
+    parser.add_argument("--intermediate_size", type=int, default=1536)
     parser.add_argument("--dropout", type=float, default=0.1)
 
     # loss tricks
