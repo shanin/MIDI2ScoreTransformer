@@ -1,12 +1,37 @@
 """Utilities for inference, including batched and chunked inference and postprocessing."""
+import importlib
 import warnings
 
 import torch
-from muster import muster
 from score_transformer import score_similarity
 
 from tokenizer import MultistreamTokenizer
 from score_utils import postprocess_score
+
+
+def _import_muster():
+    """
+    Resolve the MUSTER metric function even if a different `muster` package is on sys.path.
+
+    Some environments install an unrelated PyPI package named `muster` whose top-level
+    `__init__.py` does not re-export `muster`. The evaluation wrapper used in this repo
+    lives at `muster.muster:muster` in the MUSTER pip distribution.
+    """
+    m = importlib.import_module("muster")
+    fn = getattr(m, "muster", None)
+    if callable(fn):
+        return fn
+    m2 = importlib.import_module("muster.muster")
+    fn = getattr(m2, "muster", None)
+    if callable(fn):
+        return fn
+    raise ImportError(
+        "Could not import MUSTER metric function `muster`. "
+        "Expected `from muster import muster` or `from muster.muster import muster`."
+    )
+
+
+muster = _import_muster()
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 

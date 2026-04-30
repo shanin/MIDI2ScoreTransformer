@@ -24,9 +24,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dataset import ASAPDataset
 from models.roformer import Roformer
 from tokenizer import MultistreamTokenizer
-from utils import infer, pad_batch, score_similarity_normalized
+from utils import infer, pad_batch, score_similarity_normalized, muster
 from score_utils import postprocess_score
-from muster import muster
 from beat_features import BeatFeatureConfig
 
 device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
