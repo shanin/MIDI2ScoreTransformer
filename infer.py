@@ -15,6 +15,12 @@ Usage:
     # Larger chunks for long pieces (requires more VRAM/RAM):
     python infer.py --midi perf.mid --checkpoint model.ckpt --chunk 1024 --overlap 128
 
+    # With external beats (ASAP-style <stem>_annotations.txt next to the MIDI):
+    python infer.py --midi FHP08.mid --checkpoint model.ckpt --with-beats
+
+    # Checkpoint from before beat input layers (load extra layers + zero them so beats are neutral):
+    python infer.py --midi FHP08.mid --checkpoint old.ckpt --with-beats --no_strict_checkpoint --zero_beat_encoder
+
 Requirements:
     Install all dependencies from requirements.txt, plus manually clone and install muster:
         git clone https://github.com/TimFelixBeyer/amtevaluation.github.io
@@ -40,14 +46,30 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(SCRIPT_DIR, "midi2scoretransformer"))
 
 import torch
+import torch.nn as nn
+from beat_features import BeatFeatureConfig
+from beat_txt import BeatTxtConfig, infer_annotations_txt_path
 from models.roformer import Roformer
-from tokenizer import MultistreamTokenizer
 from score_utils import postprocess_score
+from tokenizer import MultistreamTokenizer
 
 
 # ---------------------------------------------------------------------------
 # Device helpers
 # ---------------------------------------------------------------------------
+
+def zero_beat_encoder_linears(model) -> None:
+    """Match train_with_beats warm-start: beat streams contribute zero to the encoder sum."""
+    enc = getattr(model, "embeddings_enc", None)
+    if enc is None or not hasattr(enc, "embeddings"):
+        return
+    for key in ("beat_in_bar", "beat_phase"):
+        lin = enc.embeddings.get(key)
+        if isinstance(lin, nn.Linear):
+            nn.init.zeros_(lin.weight)
+            if lin.bias is not None:
+                nn.init.zeros_(lin.bias)
+
 
 def get_device() -> torch.device:
     if torch.cuda.is_available():
@@ -106,8 +128,13 @@ def infer(
     n_notes = x["pitch"].shape[1]
     device_type = model.device.type  # "cuda", "mps", or "cpu"
 
-    # autocast: beneficial on CUDA (fp16), harmless elsewhere
-    use_autocast = device_type == "cuda"
+    # autocast only on CUDA; torch.autocast rejects device_type="mps" even when disabled.
+    def _run_generate(**gen_kw):
+        with torch.no_grad():
+            if device_type == "cuda":
+                with torch.autocast(device_type="cuda", enabled=True):
+                    return model.generate(**gen_kw)
+            return model.generate(**gen_kw)
 
     y_full = None
     steps = range(0, max(n_notes - overlap, 1), chunk - overlap)
@@ -121,31 +148,25 @@ def infer(
 
         if i == 0 or overlap == 0:
             # First chunk: no prior context
-            with torch.no_grad():
-                ctx = torch.autocast(device_type=device_type, enabled=use_autocast)
-                with ctx:
-                    y_hat = model.generate(
-                        x=x_chunk,
-                        top_k=1,
-                        max_length=chunk,
-                        kv_cache=kv_cache,
-                    )
+            y_hat = _run_generate(
+                x=x_chunk,
+                top_k=1,
+                max_length=chunk,
+                kv_cache=kv_cache,
+            )
         else:
             # Subsequent chunks: seed decoder with last `overlap` generated tokens
             y_context = {
                 k: v[:, -overlap:] if k != "pad" else v[:, -overlap:, 0]
                 for k, v in y_full.items()
             }
-            with torch.no_grad():
-                ctx = torch.autocast(device_type=device_type, enabled=use_autocast)
-                with ctx:
-                    y_hat = model.generate(
-                        x=x_chunk,
-                        y=y_context,
-                        top_k=1,
-                        max_length=chunk,
-                        kv_cache=kv_cache,
-                    )
+            y_hat = _run_generate(
+                x=x_chunk,
+                y=y_context,
+                top_k=1,
+                max_length=chunk,
+                kv_cache=kv_cache,
+            )
             # Drop the overlap tokens that were already in y_full
             y_hat = {k: v[:, overlap:] for k, v in y_hat.items()}
 
@@ -212,6 +233,55 @@ def main():
         action="store_true",
         help="Force CPU inference even if a GPU is available.",
     )
+    parser.add_argument(
+        "--with-beats",
+        action="store_true",
+        help=(
+            "Use tokenize_midi_with_beats() with an ASAP-style annotations file "
+            "(default: <midi_stem>_annotations.txt next to the MIDI). "
+            "Checkpoint must include beat embedding layers (default model config)."
+        ),
+    )
+    parser.add_argument(
+        "--annotations",
+        type=str,
+        default=None,
+        help="Path to *_annotations.txt (overrides default next to --midi).",
+    )
+    parser.add_argument(
+        "--annotations_suffix",
+        type=str,
+        default="_annotations.txt",
+        help="Used with --with-beats when --annotations is not set.",
+    )
+    parser.add_argument(
+        "--beat_phase_bins",
+        type=int,
+        default=48,
+        help="Must match training / checkpoint (default 48).",
+    )
+    parser.add_argument(
+        "--max_beats_per_bar",
+        type=int,
+        default=12,
+        help="Must match training / checkpoint (default 12).",
+    )
+    parser.add_argument(
+        "--no_strict_checkpoint",
+        action="store_true",
+        help=(
+            "Load weights with strict=False. Needed if the checkpoint predates beat input layers "
+            "(state dict lacks embeddings_enc.embeddings.beat_*)."
+        ),
+    )
+    parser.add_argument(
+        "--zero_beat_encoder",
+        action="store_true",
+        help=(
+            "After loading, zero encoder beat_in_bar / beat_phase linear weights (neutral beat signal). "
+            "Typical with --no_strict_checkpoint --with-beats on older checkpoints."
+        ),
+    )
     args = parser.parse_args()
 
     # --- Resolve output path ---------------------------------------------------
@@ -225,9 +295,15 @@ def main():
 
     # --- Load model ------------------------------------------------------------
     print(f"Loading checkpoint: {args.checkpoint}")
-    model = Roformer.load_from_checkpoint(args.checkpoint, map_location=device)
+    model = Roformer.load_from_checkpoint(
+        args.checkpoint,
+        map_location=device,
+        strict=not args.no_strict_checkpoint,
+    )
     model.to(device)
     model.eval()
+    if args.zero_beat_encoder:
+        zero_beat_encoder_linears(model)
 
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Model  : {n_params / 1e6:.1f}M parameters")
@@ -236,7 +312,30 @@ def main():
     print(f"Input  : {args.midi}")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        x = MultistreamTokenizer.tokenize_midi(args.midi)
+        if args.with_beats:
+            ann_path = args.annotations
+            if ann_path is None:
+                ann_path = infer_annotations_txt_path(
+                    args.midi,
+                    config=BeatTxtConfig(suffix=args.annotations_suffix),
+                )
+            if not os.path.isfile(ann_path):
+                raise FileNotFoundError(
+                    f"--with-beats requires annotations at {ann_path!r} "
+                    f"(pass --annotations / place {args.annotations_suffix!r} next to the MIDI)."
+                )
+            print(f"Beats  : {ann_path}")
+            beat_cfg = BeatFeatureConfig(
+                phase_bins=args.beat_phase_bins,
+                max_beats_per_bar=args.max_beats_per_bar,
+            )
+            x = MultistreamTokenizer.tokenize_midi_with_beats(
+                args.midi,
+                annotations_path=ann_path,
+                beat_feat_cfg=beat_cfg,
+            )
+        else:
+            x = MultistreamTokenizer.tokenize_midi(args.midi)
     n_notes = x["pitch"].shape[0]
     print(f"Notes  : {n_notes}")
 

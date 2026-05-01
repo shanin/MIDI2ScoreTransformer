@@ -1,5 +1,20 @@
 from transformers import RoFormerConfig
 
+# Defaults for MIDI beat feature streams (must match BeatFeatureConfig / train_with_beats).
+DEFAULT_IN_BEAT_IN_BAR_VOCAB_SIZE = 13  # max_beats_per_bar 12 + unknown
+DEFAULT_IN_BEAT_PHASE_VOCAB_SIZE = 49  # phase_bins 48 + unknown
+
+
+def ensure_legacy_my_model_config(config) -> None:
+    """
+    Checkpoints from before beat inputs were added may deserialize without
+    in_beat_* on MyModelConfig; encoder MIDIEmbeddings requires them.
+    """
+    if not hasattr(config, "in_beat_in_bar_vocab_size"):
+        config.in_beat_in_bar_vocab_size = DEFAULT_IN_BEAT_IN_BAR_VOCAB_SIZE
+    if not hasattr(config, "in_beat_phase_vocab_size"):
+        config.in_beat_phase_vocab_size = DEFAULT_IN_BEAT_PHASE_VOCAB_SIZE
+
 
 # TODO: Make this single source of truth
 FEATURES = {

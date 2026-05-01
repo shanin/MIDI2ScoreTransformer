@@ -20,6 +20,7 @@ from transformers.modeling_outputs import \
 from transformers.models.roformer.modeling_roformer import (RoFormerAttention,
                                                             RoFormerEncoder,
                                                             RoFormerLayer)
+from config import ensure_legacy_my_model_config
 from models.embedding import MIDIEmbeddings, MXLEmbeddings, MXLUnembeddings
 from models.model import BaseModel
 
@@ -373,6 +374,8 @@ class RoFormerModel(RoFormerModelBase):
 class Roformer(BaseModel):
     def __init__(self, enc_configuration=None, dec_configuration=None, hyperparameters=None):
         super().__init__(enc_configuration, dec_configuration, hyperparameters)
+        ensure_legacy_my_model_config(enc_configuration)
+        ensure_legacy_my_model_config(dec_configuration)
         self.encoder = RoFormerModel(enc_configuration)
         self.decoder = RoFormerModel(dec_configuration)
         self.embeddings_enc = MIDIEmbeddings(enc_configuration)

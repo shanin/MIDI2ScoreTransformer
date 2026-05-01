@@ -144,8 +144,16 @@ def infer(x, model, overlap=64, chunk=512, verbose=True, kv_cache=True) -> dict[
         else:
             # Keep the last 'overlap' notes of the previous chunk as context
             y_hat_prev = {k: v[:, -overlap:] if k != 'pad' else v[:, -overlap:, 0] for k, v in y_full.items()}
-            with torch.autocast(device_type=device):
-                y_hat = model.generate(x=x_chunk, y=y_hat_prev, top_k=1, max_length=chunk, kv_cache=kv_cache)
+            with torch.no_grad():
+                if model.device.type == "cuda":
+                    with torch.autocast(device_type="cuda", enabled=True):
+                        y_hat = model.generate(
+                            x=x_chunk, y=y_hat_prev, top_k=1, max_length=chunk, kv_cache=kv_cache
+                        )
+                else:
+                    y_hat = model.generate(
+                        x=x_chunk, y=y_hat_prev, top_k=1, max_length=chunk, kv_cache=kv_cache
+                    )
             y_hat = {k: v[:, overlap:] for k, v in y_hat.items()}
 
         if y_full is None:

@@ -315,6 +315,24 @@ def main():
     parser.add_argument("--limit_train_batches", type=float, default=1.0)
     parser.add_argument("--limit_val_batches", type=float, default=1.0)
     parser.add_argument(
+        "--early_stop_patience",
+        type=int,
+        default=5,
+        help="Stop if val/loss_total does not improve for this many validation epochs. Set 0 to disable.",
+    )
+    parser.add_argument(
+        "--early_stop_min_delta",
+        type=float,
+        default=0.0,
+        help="Minimum change in val/loss_total to qualify as an improvement (default 0).",
+    )
+    parser.add_argument(
+        "--checkpoint_every_n_train_steps",
+        type=int,
+        default=0,
+        help="If > 0, also save a checkpoint every N training steps (separate from val-based top-k). 0 disables.",
+    )
+    parser.add_argument(
         "--disable_slurm_env",
         action="store_true",
         help="Force Lightning to ignore SLURM environment detection (useful on misconfigured clusters).",
@@ -446,7 +464,7 @@ def main():
 
     try:
         import pytorch_lightning as pl
-        from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
+        from pytorch_lightning.callbacks import EarlyStopping, LearningRateMonitor, ModelCheckpoint
         from pytorch_lightning.loggers import CSVLogger
     except ModuleNotFoundError as e:
         raise ModuleNotFoundError(
@@ -482,16 +500,42 @@ def main():
         loggers.append(wandb_logger)
 
     logger = loggers if len(loggers) > 1 else loggers[0]
+    ckpt_dir = os.path.join(args.out_dir, args.run_name, "checkpoints")
+    # Validation-aligned checkpointing (best-k + last). This also runs on the final validation
+    # epoch when EarlyStopping triggers, so `last.ckpt` reflects the stopped run.
     ckpt_cb = ModelCheckpoint(
-        dirpath=os.path.join(args.out_dir, args.run_name, "checkpoints"),
+        dirpath=ckpt_dir,
         filename="{step}-{val/loss_total:.4f}",
         save_top_k=3,
         monitor="val/loss_total",
         mode="min",
         save_last=True,
-        every_n_train_steps=1000,
+        save_on_train_epoch_end=False,
+        every_n_epochs=1,
     )
     lr_cb = LearningRateMonitor(logging_interval="step")
+
+    callbacks = [ckpt_cb, lr_cb]
+    if args.checkpoint_every_n_train_steps > 0:
+        callbacks.append(
+            ModelCheckpoint(
+                dirpath=ckpt_dir,
+                filename="step={step}",
+                save_top_k=-1,
+                every_n_train_steps=args.checkpoint_every_n_train_steps,
+                save_on_train_epoch_end=False,
+            )
+        )
+    if args.early_stop_patience > 0:
+        callbacks.append(
+            EarlyStopping(
+                monitor="val/loss_total",
+                mode="min",
+                patience=args.early_stop_patience,
+                min_delta=args.early_stop_min_delta,
+                verbose=True,
+            )
+        )
 
     accelerator = "gpu" if torch.cuda.is_available() else "cpu"
     devices = [args.gpu_id] if accelerator == "gpu" else 1
@@ -504,7 +548,7 @@ def main():
         gradient_clip_val=0.5,
         logger=logger,
         plugins=[pl.plugins.environments.LightningEnvironment()] if args.disable_slurm_env else None,
-        callbacks=[ckpt_cb, lr_cb],
+        callbacks=callbacks,
         log_every_n_steps=20,
         fast_dev_run=args.fast_dev_run,
         limit_train_batches=args.limit_train_batches,

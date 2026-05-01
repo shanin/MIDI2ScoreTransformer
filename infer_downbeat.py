@@ -340,9 +340,8 @@ def infer_constrained(
 
     try:
         x = {k: v.unsqueeze(0).to(model.device) for k, v in x.items()}
-        n_notes     = x["pitch"].shape[1]
-        device_type = model.device.type
-        use_autocast = device_type == "cuda"
+        n_notes = x["pitch"].shape[1]
+        use_cuda_amp = model.device.type == "cuda"
 
         db_tensor = torch.from_numpy(downbeat_constraints.astype(bool))  # (n_notes,)
 
@@ -355,31 +354,35 @@ def infer_constrained(
             # Constraint slice for this chunk, with batch dimension
             db_chunk = db_tensor[i : i + chunk].unsqueeze(0)  # (1, slice_len)
 
-            ctx = torch.autocast(device_type=device_type, enabled=use_autocast)
-            with torch.no_grad(), ctx:
+            def _forward_chunk() -> dict:
                 if i == 0 or overlap == 0:
-                    y_hat = model.generate(
+                    return model.generate(
                         x=x_chunk,
                         top_k=1,
                         max_length=chunk,
                         kv_cache=kv_cache,
                         downbeat_constraints=db_chunk,
                     )
+                y_context = {
+                    k: v[:, -overlap:] if k != "pad" else v[:, -overlap:, 0]
+                    for k, v in y_full.items()
+                }
+                y_hat_inner = model.generate(
+                    x=x_chunk,
+                    y=y_context,
+                    top_k=1,
+                    max_length=chunk,
+                    kv_cache=kv_cache,
+                    downbeat_constraints=db_chunk,
+                )
+                return {k: v[:, overlap:] for k, v in y_hat_inner.items()}
+
+            with torch.no_grad():
+                if use_cuda_amp:
+                    with torch.autocast(device_type="cuda", enabled=True):
+                        y_hat = _forward_chunk()
                 else:
-                    y_context = {
-                        k: v[:, -overlap:] if k != "pad" else v[:, -overlap:, 0]
-                        for k, v in y_full.items()
-                    }
-                    y_hat = model.generate(
-                        x=x_chunk,
-                        y=y_context,
-                        top_k=1,
-                        max_length=chunk,
-                        kv_cache=kv_cache,
-                        downbeat_constraints=db_chunk,
-                    )
-                    # Drop the overlap tokens already present in y_full
-                    y_hat = {k: v[:, overlap:] for k, v in y_hat.items()}
+                    y_hat = _forward_chunk()
 
             y_full = (
                 y_hat
